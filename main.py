@@ -62,6 +62,7 @@ def draw_ai_player(x,y):
    pg.draw.rect(window,PLAYER_COLOR,shape)
    
    pg.display.update(shape)
+   return shape
 
 def clean_ai_player(x,y):
    shape = pg.Rect(x,y,SIZE,SIZE)
@@ -89,7 +90,11 @@ def player_move_right(x,y):
    draw_ai_player(x+1,y)
    return new_x,y
 
-  
+def collision_detect(player):
+   for obj in falling_object:
+      if player.colliderect(obj["rect"]):
+         return True
+   return False
 
 
 
@@ -104,7 +109,10 @@ def main():
          if event.type == pg.QUIT:
             running= False
 
-      
+      # collision Detection 
+
+
+
 
       if frame_count % 30 == 0:
             create_falling_object()
@@ -114,6 +122,9 @@ def main():
       player =  draw_ai_player(START_X,START_Y)
       dirty_rect.append(player)
 
+      if collision_detect(player) == True:
+         print("Collision detection")
+         running = False
       pg.display.update(dirty_rect)
       fpsClock.tick(FPS)
       frame_count += 1
