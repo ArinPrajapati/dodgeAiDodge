@@ -1,5 +1,5 @@
 import pygame as pg
-import sys, random, time
+import sys, random, time, csv
 import numpy as np
 import torch
 import torch.nn as nn
@@ -35,18 +35,18 @@ class DodgeEnv:
         self.player_y = self.HEIGHT - self.SIZE - 10
         self.falling_objects = []  # Each object: {"rect": pg.Rect, "speed": int, "rewarded": bool}
         self.time_elapsed = 0.0  # seconds elapsed in the episode
+        self.last_action = 0  # 0: stay, 1: left, 2: right
         return self.get_state()
 
     def get_state(self):
         """
-        The state is represented as a vector:
+        State vector:
           [player_x/WIDTH, player_y/HEIGHT, nearest_obj_x/WIDTH, nearest_obj_y/HEIGHT, nearest_obj_speed/5]
         If no falling objects exist, defaults to zeros.
         """
         nearest = None
         min_dist = float('inf')
         for obj in self.falling_objects:
-            # Only consider objects that are above the player (i.e. falling toward the player)
             dist = self.player_y - obj["rect"].y  
             if dist >= 0 and dist < min_dist:
                 min_dist = dist
@@ -74,30 +74,41 @@ class DodgeEnv:
         Returns: next_state, reward, done, info.
         """
         reward = 0.0
-        # Add time reward (per frame)
-        reward += 0.01 / self.fps
-        # Penalty for staying in place (discourage inactivity)
-        if action == 0:
-            reward -= 0.08 / self.fps
+        # Time-based reward (per frame)
+        reward += 1 / self.fps
 
-        # Update player's position
+        # Small penalty for rapid direction changes (discourage jitter)
+        if self.last_action != action and self.last_action != 0 and action != 0:
+            reward -= 0.02
+        self.last_action = action
+
+        # Update player's position with a larger step for more decisive movement.
         if action == 1:
-            self.player_x = max(0, self.player_x - 1)
+            self.player_x = max(0, self.player_x - 5)
         elif action == 2:
-            self.player_x = min(self.WIDTH - self.SIZE, self.player_x + 1)
+            self.player_x = min(self.WIDTH - self.SIZE, self.player_x + 5)
+        # No penalty for staying in place.
 
-        # Update falling objects
+        safe_distance = 30  # desired horizontal separation in pixels
+
+        # Update falling objects and apply danger-zone reward shaping.
         for obj in self.falling_objects:
             obj["rect"].y += obj["speed"]
-            # When a falling object enters the danger zone (and hasn't been rewarded yet), give bonus.
-            if (not obj["rewarded"]) and (obj["rect"].y >= self.player_y - self.danger_zone):
-                reward += 4.0
+            # When the object reaches the danger zone, check horizontal separation.
+            if not obj["rewarded"] and (obj["rect"].y >= self.player_y - self.danger_zone):
+                obj_center = obj["rect"].x + obj["rect"].width/2
+                player_center = self.player_x + self.SIZE/2
+                diff = abs(obj_center - player_center)
+                if diff >= safe_distance:
+                    reward += 1.0   # Good dodge: RS is far enough.
+                else:
+                    reward -= 1.0   # Too close: penalize.
                 obj["rewarded"] = True
 
-        # Remove objects that have fallen off-screen.
+        # Remove falling objects that have fallen off-screen.
         self.falling_objects = [obj for obj in self.falling_objects if obj["rect"].y < self.HEIGHT]
 
-        # Occasionally spawn a new falling object (adjust the probability as needed)
+        # Occasionally spawn a new falling object.
         if random.random() < 0.03:
             x = random.randint(0, self.WIDTH - 20)
             y = 0
@@ -106,13 +117,13 @@ class DodgeEnv:
                                          "speed": speed,
                                          "rewarded": False})
 
-        # Check for collisions. (A collision ends the episode.)
+        # Check for collisions (which end the episode with a heavy penalty).
         player_rect = pg.Rect(self.player_x, self.player_y, self.SIZE, self.SIZE)
         done = False
         for obj in self.falling_objects:
             if player_rect.colliderect(obj["rect"]):
                 done = True
-                reward -= 100 # heavy penalty for collision
+                reward -= 10
                 break
 
         self.time_elapsed += 1 / self.fps
@@ -122,12 +133,14 @@ class DodgeEnv:
     def render(self):
         if not self.render_mode:
             return
-        # Draw background
+        # Process events to avoid "not responding" warnings.
+        for event in pg.event.get():
+            if event.type == pg.QUIT:
+                pg.quit()
+                sys.exit()
         self.window.fill(self.BACKGROUND)
-        # Draw falling objects
         for obj in self.falling_objects:
             pg.draw.rect(self.window, self.FALLING_COLOR, obj["rect"])
-        # Draw player
         player_rect = pg.Rect(self.player_x, self.player_y, self.SIZE, self.SIZE)
         pg.draw.rect(self.window, self.PLAYER_COLOR, player_rect)
         pg.display.update()
@@ -164,16 +177,22 @@ class ReplayMemory:
         return len(self.memory)
 
 #############################
+# CSV Logging Functionality #
+#############################
+
+def log_episode(log_writer, episode, total_reward, steps, epsilon):
+    log_writer.writerow([episode, total_reward, steps, epsilon])
+
+#############################
 # Training Loop and Agent   #
 #############################
 
 def train_dqn():
-    # Create environment. Set render_mode=True to see the game.
+    # For long-term testing, you can set render_mode=False.
     env = DodgeEnv(render_mode=True)
     state_dim = 5    # [player_x, player_y, nearest_obj_x, nearest_obj_y, nearest_obj_speed]
     action_dim = 3   # 0 = stay, 1 = left, 2 = right
 
-    # Create the policy and target networks.
     policy_net = DQN(state_dim, action_dim)
     target_net = DQN(state_dim, action_dim)
     target_net.load_state_dict(policy_net.state_dict())
@@ -190,55 +209,62 @@ def train_dqn():
     num_episodes = 500
     update_target_every = 10
 
-    for i_episode in range(num_episodes):
-        state = env.reset()
-        state = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
-        total_reward = 0.0
-        done = False
-        step_count = 0
+    # Open CSV log file for recording episode data.
+    log_filename = "dodge_ai_log.csv"
+    with open(log_filename, "w", newline="") as csvfile:
+        log_writer = csv.writer(csvfile)
+        log_writer.writerow(["Episode", "Total Reward", "Steps", "Epsilon"])
 
-        while not done:
-            # Epsilon-greedy action selection
-            if random.random() < epsilon:
-                action = random.randrange(action_dim)
-            else:
-                with torch.no_grad():
-                    q_values = policy_net(state)
-                    action = q_values.argmax().item()
+        for i_episode in range(num_episodes):
+            state = env.reset()
+            state = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+            total_reward = 0.0
+            done = False
+            step_count = 0
 
-            next_state, reward, done, _ = env.step(action)
-            total_reward += reward
-            next_state_tensor = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0)
-            memory.push((state, action, reward, next_state_tensor, done))
-            state = next_state_tensor
+            while not done:
+                if random.random() < epsilon:
+                    action = random.randrange(action_dim)
+                else:
+                    with torch.no_grad():
+                        q_values = policy_net(state)
+                        action = q_values.argmax().item()
 
-            # Sample random mini-batch and perform a training step if we have enough samples
-            if len(memory) >= batch_size:
-                transitions = memory.sample(batch_size)
-                batch_state, batch_action, batch_reward, batch_next_state, batch_done = zip(*transitions)
-                batch_state = torch.cat(batch_state)
-                batch_action = torch.tensor(batch_action).unsqueeze(1)
-                batch_reward = torch.tensor(batch_reward, dtype=torch.float32).unsqueeze(1)
-                batch_next_state = torch.cat(batch_next_state)
-                batch_done = torch.tensor(batch_done, dtype=torch.float32).unsqueeze(1)
+                next_state, reward, done, _ = env.step(action)
+                total_reward += reward
+                next_state_tensor = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0)
+                memory.push((state, action, reward, next_state_tensor, done))
+                state = next_state_tensor
 
-                current_q = policy_net(batch_state).gather(1, batch_action)
-                with torch.no_grad():
-                    max_next_q = target_net(batch_next_state).max(1)[0].unsqueeze(1)
-                    expected_q = batch_reward + gamma * max_next_q * (1 - batch_done)
-                loss = nn.MSELoss()(current_q, expected_q)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                if len(memory) >= batch_size:
+                    transitions = memory.sample(batch_size)
+                    batch_state, batch_action, batch_reward, batch_next_state, batch_done = zip(*transitions)
+                    batch_state = torch.cat(batch_state)
+                    batch_action = torch.tensor(batch_action).unsqueeze(1)
+                    batch_reward = torch.tensor(batch_reward, dtype=torch.float32).unsqueeze(1)
+                    batch_next_state = torch.cat(batch_next_state)
+                    batch_done = torch.tensor(batch_done, dtype=torch.float32).unsqueeze(1)
 
-            if env.render_mode:
-                env.render()
-            step_count += 1
+                    current_q = policy_net(batch_state).gather(1, batch_action)
+                    with torch.no_grad():
+                        max_next_q = target_net(batch_next_state).max(1)[0].unsqueeze(1)
+                        expected_q = batch_reward + gamma * max_next_q * (1 - batch_done)
+                    loss = nn.MSELoss()(current_q, expected_q)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
 
-        print(f"Episode {i_episode} Total Reward: {total_reward:.2f}  Steps: {step_count}")
-        epsilon = max(epsilon_min, epsilon * epsilon_decay)
-        if i_episode % update_target_every == 0:
-            target_net.load_state_dict(policy_net.state_dict())
+                if env.render_mode:
+                    env.render()
+                step_count += 1
+
+            print(f"Episode {i_episode} Total Reward: {total_reward:.2f}  Steps: {step_count}  Epsilon: {epsilon:.3f}")
+            log_episode(log_writer, i_episode, total_reward, step_count, epsilon)
+            csvfile.flush()
+
+            epsilon = max(epsilon_min, epsilon * epsilon_decay)
+            if i_episode % update_target_every == 0:
+                target_net.load_state_dict(policy_net.state_dict())
 
     if env.render_mode:
         pg.quit()
