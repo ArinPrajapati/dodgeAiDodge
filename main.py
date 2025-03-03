@@ -2,7 +2,6 @@ import pygame as pg
 import sys
 import random
 
-from pygame.display import update 
 # GAME SCREEN SIZE CONSTANT
 WIDTH = 500
 HEIGHT = 500
@@ -96,11 +95,35 @@ def collision_detect(player):
          return True
    return False
 
+def ai_move(player_x,player_y):
+   danger_zone = 100
+   move_direction= 0
 
+   for obj in falling_object:
+      if player_y - danger_zone < obj["rect"].y < player_y:
+         obj_center  = obj["rect"].x + 10
+         player_center = player_x + SIZE / 2
+
+         if obj_center < player_center:
+            move_direction = 1
+         else:
+            move_direction = -1
+         break
+
+   new_x = player_x + move_direction
+
+   if new_x < 0:
+      new_x = 0
+   if new_x + SIZE > WIDTH:
+      new_x = WIDTH - SIZE
+   return new_x
 
 def main():
    global running
    frame_count = 0
+   player_x = START_X
+   player_y = START_Y   
+
    while running:
       # list to hold all changes regions this frame.
       dirty_rect = []
@@ -119,7 +142,16 @@ def main():
       
       dirty_rect.extend(update_falling_object())
 
-      player =  draw_ai_player(START_X,START_Y)
+
+      old_player_rect = clean_ai_player(player_x,player_y)
+      dirty_rect.append(old_player_rect)
+
+      player_x = ai_move(player_x,player_y)
+
+
+
+
+      player =  draw_ai_player(player_x,player_y)
       dirty_rect.append(player)
 
       if collision_detect(player) == True:

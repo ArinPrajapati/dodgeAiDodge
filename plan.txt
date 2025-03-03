@@ -9,22 +9,22 @@ Reinforcement Learning (Q-learning or heuristic-based AI)
 
 3. Step-by-Step Plan
 
-Step 1: Set Up the Game Environment
+Step 1: Set Up the Game Environment - done 
 Create a Pygame window (e.g., 500x500 pixels).
 Add a player (square or circle) at the bottom of the screen.
 Generate falling objects that randomly drop from the top.
 
 
-Step 2: Implement Player Movement
+Step 2: Implement Player Movement -done 
 Allow the player to move left and right within screen boundaries.
 Initially, the AI will move randomly.
 
-Step 3: Collision Detection
+Step 3: Collision Detection - done 
 If a falling object hits the player, the game ends (or the player loses a life).
 If the player dodges successfully, it gains a reward.
 
 
-Step 4: Add Basic AI (Random Movements)
+Step 4: Add Basic AI (Random Movements) - done 
 AI makes random moves (left, right, or stay still).
 Run a loop where AI repeatedly plays the game.
 
